@@ -1,0 +1,1666 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ZeroDrop — Private P2P Transfer & Vault</title>
+  <meta name="theme-color" content="#070708" />
+
+  <script>
+    (function () {
+      const origWarn = console.warn;
+      console.warn = function (...args) {
+        if (typeof args[0] === "string" && args[0].includes("cdn.tailwindcss.com should not be used in production")) return;
+        origWarn.apply(console, args);
+      };
+    })();
+  </script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['"Plus Jakarta Sans"', 'Inter', 'sans-serif'],
+            mono: ['"JetBrains Mono"', 'monospace'],
+          }
+        }
+      }
+    }
+  </script>
+
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+
+  <style>
+    body { font-family: 'Plus Jakarta Sans', sans-serif; }
+    html.dark body { background-color: #070708; color: #f4f4f5; }
+    html:not(.dark) body { background-color: #f8fafc; color: #09090b; }
+
+    .bg-grid {
+      background-size: 32px 32px;
+      background-image: linear-gradient(to right, rgba(255,255,255,.03) 1px, transparent 1px),
+                        linear-gradient(to bottom, rgba(255,255,255,.03) 1px, transparent 1px);
+    }
+    html:not(.dark) .bg-grid {
+      background-image: linear-gradient(to right, rgba(0,0,0,.04) 1px, transparent 1px),
+                        linear-gradient(to bottom, rgba(0,0,0,.04) 1px, transparent 1px);
+    }
+
+    .glass-card-dark {
+      background: rgba(14,14,17,.9);
+      backdrop-filter: blur(16px);
+      border: 1px solid rgba(255,255,255,.08);
+      box-shadow: 0 12px 30px -10px rgba(0,0,0,.6);
+    }
+    html:not(.dark) .glass-card-dark {
+      background: rgba(255,255,255,.95);
+      border: 1px solid rgba(0,0,0,.08);
+      box-shadow: 0 10px 25px -5px rgba(0,0,0,.05);
+    }
+
+    .dropzone-active {
+      border-color: #ffffff !important;
+      background: rgba(255,255,255,.05) !important;
+    }
+    html:not(.dark) .dropzone-active {
+      border-color: #09090b !important;
+      background: rgba(0,0,0,.04) !important;
+    }
+
+    #qrCanvas { display: block; max-width: 100%; image-rendering: pixelated; }
+
+    summary::-webkit-details-marker { display: none; }
+    summary { list-style: none; }
+    details[open] .chev { transform: rotate(90deg); }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col bg-grid selection:bg-zinc-200 selection:text-zinc-950">
+
+  <!-- ============ HEADER ============ -->
+  <header class="sticky top-0 z-40 border-b bg-white/85 dark:bg-[#070708]/85 border-zinc-200 dark:border-zinc-800/80 backdrop-blur-md">
+    <div class="max-w-5xl mx-auto px-4 h-14 flex items-center justify-between">
+
+      <div class="flex items-center gap-2.5">
+        <div class="w-8 h-8 rounded-lg bg-gradient-to-tr from-zinc-700 via-zinc-400 to-white p-[1px]">
+          <div class="w-full h-full bg-zinc-950 rounded-[7px] flex items-center justify-center text-white font-extrabold text-sm">Z</div>
+        </div>
+        <span class="font-bold text-base tracking-tight text-zinc-900 dark:text-white">ZeroDrop</span>
+      </div>
+
+      <div class="flex items-center gap-2">
+        <nav class="flex p-1 rounded-xl bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800">
+          <button id="tabP2P" type="button" onclick="switchTab('p2p')"
+            class="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition bg-white dark:bg-zinc-100 text-zinc-900 dark:text-zinc-950 shadow-sm">
+            <i class="fa-solid fa-bolt text-[10px]"></i><span>Send</span>
+          </button>
+          <button id="tabVault" type="button" onclick="switchTab('vault')"
+            class="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white">
+            <i class="fa-solid fa-lock text-[10px]"></i><span>Vault</span>
+          </button>
+        </nav>
+
+        <button type="button" onclick="toggleTheme()" aria-label="Toggle theme"
+          class="w-9 h-9 rounded-xl flex items-center justify-center transition bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-800">
+          <i id="themeIcon" class="fa-solid fa-sun text-xs"></i>
+        </button>
+      </div>
+
+    </div>
+  </header>
+
+  <!-- ============ MAIN ============ -->
+  <main class="max-w-5xl w-full mx-auto px-4 py-6 flex-1">
+
+    <!-- ========== VIEW 1: P2P ========== -->
+    <div id="viewP2P" class="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+
+      <!-- Connect -->
+      <section class="lg:col-span-5 glass-card-dark rounded-2xl p-6">
+        <div class="flex items-center justify-between mb-5">
+          <h2 class="text-sm font-bold text-zinc-900 dark:text-white">1 · Pair devices</h2>
+          <span id="p2pBadge" class="text-[10px] font-mono px-2 py-0.5 rounded-full font-medium border bg-zinc-800 text-zinc-300 border-zinc-700">
+            Starting…
+          </span>
+        </div>
+
+        <div class="flex flex-col items-center">
+
+          <!-- BIG CODE -->
+          <div class="w-full">
+            <div class="text-[10px] uppercase tracking-widest text-zinc-500 dark:text-zinc-400 text-center mb-2 font-semibold">
+              Your connect code
+            </div>
+            <div id="codeDisplay" class="flex justify-center gap-1 sm:gap-1.5 flex-wrap"></div>
+
+            <div class="flex items-center justify-center gap-2 mt-3">
+              <button type="button" onclick="copyCode()"
+                class="px-3.5 py-2 rounded-xl bg-zinc-900 text-white dark:bg-white dark:text-zinc-950 hover:bg-zinc-800 dark:hover:bg-zinc-200 active:scale-[0.98] text-[11px] font-bold transition flex items-center gap-1.5 shadow-lg shadow-black/20">
+                <i id="copyCodeIcon" class="fa-regular fa-copy text-[10px]"></i>
+                <span id="copyCodeText">Copy code</span>
+              </button>
+              <button type="button" onclick="regenerateCode()"
+                class="px-3.5 py-2 rounded-xl bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-900 dark:hover:bg-zinc-800 border border-zinc-200 dark:border-zinc-800 text-zinc-700 dark:text-zinc-200 text-[11px] font-semibold transition flex items-center gap-1.5">
+                <i class="fa-solid fa-rotate text-[10px]"></i><span>New</span>
+              </button>
+            </div>
+
+            <p class="text-[10px] text-zinc-400 dark:text-zinc-500 mt-2.5 text-center">
+              Type this code on the other device, or scan the QR below.
+            </p>
+          </div>
+
+          <!-- QR -->
+          <div class="mt-5 p-3 bg-white rounded-2xl shadow-xl flex items-center justify-center">
+            <canvas id="qrCanvas" width="200" height="200"></canvas>
+          </div>
+          <p id="qrNote" class="text-[10px] text-zinc-400 dark:text-zinc-500 mt-2.5 text-center font-mono px-2">
+            On the same Wi‑Fi? Traffic stays on your local network.
+          </p>
+        </div>
+
+        <!-- JOIN BY CODE -->
+        <div class="mt-5 pt-4 border-t border-zinc-200/70 dark:border-zinc-800/70">
+          <label for="joinInput" class="block text-[11px] text-zinc-500 dark:text-zinc-400 mb-1.5 font-medium">
+            Connect to another device
+          </label>
+          <div class="flex gap-2">
+            <input id="joinInput" type="text" inputmode="numeric" autocomplete="one-time-code"
+              placeholder="12345678" maxlength="8"
+              oninput="this.value = this.value.replace(/[^0-9]/g,'').slice(0,8)"
+              onkeydown="if(event.key==='Enter') manualJoin()"
+              class="flex-1 min-w-0 bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-xl px-3 py-2.5 text-center font-mono text-base tracking-[0.25em] text-zinc-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-zinc-500 placeholder-zinc-400 dark:placeholder-zinc-600 placeholder:tracking-[0.25em]" />
+            <button type="button" onclick="manualJoin()"
+              class="px-4 py-2 rounded-xl bg-zinc-900 text-white dark:bg-white dark:text-zinc-950 hover:bg-zinc-800 dark:hover:bg-zinc-200 text-xs font-bold shrink-0 transition">
+              Connect
+            </button>
+          </div>
+          <p id="joinHint" class="text-[10px] text-zinc-400 dark:text-zinc-500 mt-2 hidden"></p>
+        </div>
+
+        <!-- ADVANCED: local signaling -->
+        <details class="mt-4 group">
+          <summary class="text-[11px] text-zinc-500 dark:text-zinc-500 cursor-pointer hover:text-zinc-800 dark:hover:text-zinc-300 flex items-center gap-1.5 select-none">
+            <i class="fa-solid fa-chevron-right text-[9px] transition-transform chev"></i>
+            Advanced · offline LAN signaling
+          </summary>
+          <div class="mt-3 space-y-2">
+            <input id="signalUrlInput" type="text" value="" placeholder="Leave blank for the default public server"
+              class="w-full bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-xl px-3 py-2 text-[11px] font-mono text-zinc-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-zinc-500 placeholder-zinc-400 dark:placeholder-zinc-600" />
+            <button type="button" onclick="saveSignalSettings()"
+              class="w-full py-2 rounded-xl bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-900 dark:hover:bg-zinc-800 border border-zinc-200 dark:border-zinc-800 text-[11px] font-semibold text-zinc-700 dark:text-zinc-200 transition">
+              Save &amp; restart
+            </button>
+            <p class="text-[10px] text-zinc-400 dark:text-zinc-600 leading-relaxed">
+              Run <span class="font-mono">peerjs --port 9000</span> on a machine in your network and point both
+              devices at it. Then no internet is required at all.
+            </p>
+          </div>
+        </details>
+      </section>
+
+      <!-- Send -->
+      <section class="lg:col-span-7 glass-card-dark rounded-2xl p-6">
+        <div class="flex items-center justify-between mb-4 gap-3">
+          <h2 class="text-sm font-bold text-zinc-900 dark:text-white shrink-0">2 · Send a file</h2>
+          <div class="flex items-center gap-2 min-w-0">
+            <div class="flex items-center gap-1">
+              <span id="chDot0" class="w-1.5 h-1.5 rounded-full bg-zinc-600"></span>
+              <span id="chDot1" class="w-1.5 h-1.5 rounded-full bg-zinc-600"></span>
+              <span id="chDot2" class="w-1.5 h-1.5 rounded-full bg-zinc-600"></span>
+              <span id="chDot3" class="w-1.5 h-1.5 rounded-full bg-zinc-600"></span>
+            </div>
+            <span id="channelState" class="text-[11px] font-mono text-zinc-500 dark:text-zinc-400 truncate">Waiting for peer…</span>
+          </div>
+        </div>
+
+        <div id="connInfo" class="hidden mb-3 text-[10px] font-mono px-2.5 py-1.5 rounded-lg border"></div>
+
+        <label id="p2pDropzone" for="p2pFileInput"
+          class="border-2 border-dashed border-zinc-300 dark:border-zinc-800 hover:border-zinc-400 dark:hover:border-zinc-600 rounded-2xl p-8 flex flex-col items-center justify-center text-center cursor-pointer transition bg-zinc-50/50 dark:bg-zinc-950/40 group min-h-[180px]">
+          <input id="p2pFileInput" type="file" class="hidden" onchange="handleP2PFileSelect(Array.from(this.files)); this.value=''" />
+          <div class="w-12 h-12 rounded-2xl bg-zinc-900 border border-zinc-800 text-zinc-200 flex items-center justify-center text-xl mb-3 group-hover:scale-110 transition-transform">
+            <i class="fa-solid fa-cloud-arrow-up"></i>
+          </div>
+          <p class="text-sm font-semibold text-zinc-800 dark:text-zinc-200">Drop a file here</p>
+          <p class="text-xs text-zinc-500 dark:text-zinc-400 mt-1">or click to browse — any size</p>
+        </label>
+
+        <!-- Progress with Cancel Option -->
+        <div id="transferBox" class="mt-4 bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-xl p-4 hidden">
+          <div class="flex items-center justify-between mb-2 gap-3">
+            <div class="flex items-center gap-2 min-w-0">
+              <span id="transferDirection" class="text-[10px] font-mono font-bold px-1.5 py-0.5 rounded bg-zinc-800 text-white shrink-0">SENDING</span>
+              <span id="transferFileName" class="text-xs font-semibold text-zinc-900 dark:text-white truncate">file.bin</span>
+            </div>
+            <div class="flex items-center gap-2 shrink-0">
+              <span id="transferPercent" class="font-mono text-xs font-bold text-zinc-900 dark:text-white">0%</span>
+              <button type="button" onclick="cancelTransfer()" class="text-[10px] font-semibold px-2 py-1 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 rounded transition">Cancel</button>
+            </div>
+          </div>
+          <div class="w-full h-1.5 bg-zinc-200 dark:bg-zinc-900 rounded-full overflow-hidden mb-2">
+            <div id="transferBar" class="h-full bg-gradient-to-r from-zinc-400 to-emerald-400 transition-all duration-100" style="width:0%"></div>
+          </div>
+          <div class="flex justify-between text-[11px] font-mono text-zinc-500 dark:text-zinc-400">
+            <span id="statSpeed">0.0 MB/s</span>
+            <span id="statBytes">0 / 0 MB</span>
+          </div>
+        </div>
+
+        <!-- History -->
+        <div class="mt-5">
+          <div class="text-[11px] font-semibold uppercase tracking-wider text-zinc-400 dark:text-zinc-500 mb-2">Transfers</div>
+          <div id="fileHistory" class="space-y-2 max-h-40 overflow-y-auto pr-1">
+            <div class="text-xs text-zinc-400 dark:text-zinc-500 italic py-4 text-center border border-dashed border-zinc-200 dark:border-zinc-800/80 rounded-xl">
+              No transfers yet.
+            </div>
+          </div>
+        </div>
+      </section>
+
+    </div>
+
+    <!-- ========== VIEW 2: VAULT ========== -->
+    <div id="viewVault" class="hidden max-w-xl mx-auto glass-card-dark rounded-2xl p-6 sm:p-8">
+
+      <div class="pb-4 border-b border-zinc-200/80 dark:border-zinc-800/80">
+        <h2 class="text-base font-bold text-zinc-900 dark:text-white flex items-center gap-2">
+          <i class="fa-solid fa-vault text-zinc-400"></i>
+          Offline File Vault
+        </h2>
+        <p class="text-xs text-zinc-500 dark:text-zinc-400 mt-1">
+          Lock or unlock files in your browser. Nothing leaves your device.
+        </p>
+      </div>
+
+      <label id="vaultDropzone" for="vaultFileInput"
+        class="mt-6 border-2 border-dashed border-zinc-300 dark:border-zinc-800 hover:border-zinc-400 dark:hover:border-zinc-600 rounded-2xl p-8 flex flex-col items-center justify-center text-center cursor-pointer transition bg-zinc-50/50 dark:bg-zinc-950/40 group">
+        <input id="vaultFileInput" type="file" class="hidden" onchange="handleVaultFileSelect(Array.from(this.files)); this.value=''" />
+        <div class="w-12 h-12 rounded-2xl bg-zinc-900 border border-zinc-800 text-zinc-200 flex items-center justify-center text-xl mb-3 group-hover:scale-110 transition-transform">
+          <i class="fa-solid fa-shield-cat"></i>
+        </div>
+        <div id="vaultFileLabel" class="text-sm font-semibold text-zinc-800 dark:text-zinc-200">
+          Choose a file, or drop a <span class="font-mono">.zkvault</span> to unlock
+        </div>
+        <p id="vaultFileMeta" class="text-xs text-zinc-500 dark:text-zinc-400 mt-1">Encrypted locally with AES-256</p>
+      </label>
+
+      <div class="mt-6 space-y-4">
+        <div class="relative">
+          <i class="fa-solid fa-key absolute left-3.5 top-3.5 text-xs text-zinc-500"></i>
+          <input id="vaultPassword" type="password" placeholder="Passphrase (min 4 chars)"
+            class="w-full bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-xl pl-9 pr-10 py-2.5 text-sm text-zinc-900 dark:text-white focus:outline-none focus:ring-1 focus:ring-zinc-500 placeholder-zinc-500" />
+          <button type="button" onclick="togglePasswordVisibility()" aria-label="Show passphrase"
+            class="absolute right-3.5 top-3.5 text-zinc-500 hover:text-zinc-300">
+            <i id="pwToggleIcon" class="fa-regular fa-eye text-xs"></i>
+          </button>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <button type="button" onclick="processVault('encrypt')"
+            class="py-3 rounded-xl bg-zinc-900 text-white dark:bg-white hover:bg-zinc-800 dark:hover:bg-zinc-200 text-xs font-bold dark:text-zinc-950 transition flex items-center justify-center gap-2">
+            <i class="fa-solid fa-lock text-[11px]"></i><span>Lock file</span>
+          </button>
+          <button type="button" onclick="processVault('decrypt')"
+            class="py-3 rounded-xl bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-900 dark:hover:bg-zinc-800 border border-zinc-300 dark:border-zinc-700 text-xs font-bold text-zinc-900 dark:text-white transition flex items-center justify-center gap-2">
+            <i class="fa-solid fa-lock-open text-[11px]"></i><span>Unlock file</span>
+          </button>
+        </div>
+
+        <div id="vaultStatus" class="text-xs font-mono text-center py-2.5 px-3 rounded-xl hidden"></div>
+      </div>
+
+    </div>
+
+  </main>
+
+  <footer class="py-4 text-center text-[11px] text-zinc-500 border-t border-zinc-200/80 dark:border-zinc-800/80">
+    Files travel directly between devices — nothing is stored on a server.
+  </footer>
+
+  <script>
+    /********************************************************************
+     * CONFIG — tuned for maximum P2P throughput
+     *
+     * ▼▼▼ TWEAK THESE ▼▼▼
+     *   CODE_LENGTH        — how many digits the pairing code has.
+     *                        (8 = ~100M combinations, harder to brute
+     *                        force than 6. Use 6 for easier typing.)
+     *   PBKDF2_ITERATIONS  — key-derivation work factor. Higher = slower
+     *                        brute force on a stolen code, but a slightly
+     *                        slower pairing. 250000 is a solid default.
+     *   DEFAULT_SIGNAL_URL — prefilled value for the self-hosted PeerJS
+     *                        signaling server. Change to your LAN IP or
+     *                        hostname if you run peerjs locally.
+     ********************************************************************/
+    const CODE_LENGTH          = 8;
+    const PBKDF2_ITERATIONS    = 250000;
+    const DEFAULT_SIGNAL_URL   = "";   // "" = free public PeerJS cloud (works over HTTPS). Set your own https:// server to self-host.
+    const OLD_DEFAULT_SIGNAL   = "http://192.168.1.100:9000"; // stale value from earlier version
+
+    const SIGNAL_TIMEOUT_MS    = 12000;  // give up waiting for the signaling server after this long, then retry
+    const SIGNAL_MAX_RETRIES   = 3;
+    const LINK_TIMEOUT_MS      = 20000;  // devices found each other but no direct link after this long -> explain why
+    const PARALLEL_CHANNELS    = 4;
+    const CHUNK_SIZE           = 64 * 1024;        // 64 KB per chunk
+    const HEADER_SIZE          = 20;               // tid(4) + chunkIndex(4) + iv(12)
+    const HIGH_WATER_MARK      = 4 * 1024 * 1024;  // 4 MB buffered per channel
+    const LOW_WATER_MARK       = 1 * 1024 * 1024;  // 1 MB resume threshold
+    const PIPELINE_DEPTH       = 32;
+    const MAX_DRAIN_WAIT_MS    = 1200;
+
+    const KEY_SALT             = "ZeroDrop-P2P-v1";
+
+    /********************************************************************
+     * STATE
+     ********************************************************************/
+    let peer = null;
+    let controlConn = null;
+    let stripeChannels = [];
+    let channelChunkCounts = [0, 0, 0, 0];
+
+    let roomId = null;
+    let roomCode = null;
+    let isHostRole = true;
+
+    let aesKey = null;
+    let rawKeyBytes = null;
+    let rawKeyBase64 = "";
+
+    let incomingMeta = null;
+    let incomingChunks = [];
+    let pendingPackets = [];
+    let receivedChunkCount = 0;
+    let incomingBytes = 0;
+    let incomingStartTime = 0;
+    let isSending = false;
+    let transferAborted = false;
+    let currentSendId = 0;
+    let lastClosedId = null;
+
+    let selectedVaultFile = null;
+
+    let connInfoTimer = null;
+    let signalTimer = null, linkTimer = null, retryTimer = null;
+    let signalRetries = 0, startGen = 0, peerLibPromise = null;
+
+    /* Precompiled regexes derived from CODE_LENGTH */
+    const CODE_RE_EXACT  = new RegExp(`^\\d{${CODE_LENGTH}}$`);
+    const CODE_RE_SEARCH = new RegExp(`(\\d{${CODE_LENGTH}})`);
+
+    /********************************************************************
+     * THEME
+     ********************************************************************/
+    function initTheme() {
+      try { applyTheme(localStorage.getItem('zd_theme') || 'dark'); }
+      catch { applyTheme('dark'); }
+    }
+    function toggleTheme() {
+      const next = document.documentElement.classList.contains('dark') ? 'light' : 'dark';
+      applyTheme(next);
+      try { localStorage.setItem('zd_theme', next); } catch {}
+    }
+    function applyTheme(theme) {
+      const icon = document.getElementById('themeIcon');
+      if (theme === 'dark') {
+        document.documentElement.classList.add('dark');
+        if (icon) icon.className = 'fa-solid fa-sun text-xs';
+      } else {
+        document.documentElement.classList.remove('dark');
+        if (icon) icon.className = 'fa-solid fa-moon text-xs';
+      }
+      if (roomCode) renderQR();
+    }
+
+    /********************************************************************
+     * CRYPTO HELPERS
+     ********************************************************************/
+    const hasSubtleCrypto = () => typeof window.crypto !== "undefined" && typeof window.crypto.subtle !== "undefined";
+
+    function getRandomBytes(length) {
+      const arr = new Uint8Array(length);
+      if (typeof window.crypto !== "undefined" && window.crypto.getRandomValues) {
+        window.crypto.getRandomValues(arr);
+      } else {
+        for (let i = 0; i < length; i++) arr[i] = Math.floor(Math.random() * 256);
+      }
+      return arr;
+    }
+
+    function bufToBase64Url(buffer) {
+      const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+      let binary = "";
+      for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+      return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    }
+
+    function base64UrlToBuf(str) {
+      let b64 = str.replace(/-/g, "+").replace(/_/g, "/");
+      while (b64.length % 4) b64 += "=";
+      const binary = atob(b64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      return bytes.buffer;
+    }
+
+    function jsStreamCipher(keyBytes, ivBytes, dataBuffer) {
+      const input = new Uint8Array(dataBuffer);
+      const out = new Uint8Array(input.length);
+      const s = new Uint8Array(256);
+      for (let i = 0; i < 256; i++) s[i] = i;
+      let j = 0;
+      const kLen = keyBytes.length;
+      const ivLen = ivBytes.length;
+      for (let i = 0; i < 256; i++) {
+        const kb = keyBytes[i % kLen] ^ ivBytes[i % ivLen];
+        j = (j + s[i] + kb) & 0xff;
+        const tmp = s[i]; s[i] = s[j]; s[j] = tmp;
+      }
+      let x = 0, y = 0;
+      for (let k = 0; k < input.length; k++) {
+        x = (x + 1) & 0xff;
+        y = (y + s[x]) & 0xff;
+        const tmp = s[x]; s[x] = s[y]; s[y] = tmp;
+        out[k] = input[k] ^ s[(s[x] + s[y]) & 0xff];
+      }
+      return out.buffer;
+    }
+
+    /* ---- Code → Room ID ---- */
+    function roomIdFromCode(code) { return "zd-" + code; }
+
+    function generateRoomCode() {
+      // CODE_LENGTH digits, first digit 1-9, every digit drawn from its own random 32-bit value.
+      const arr = new Uint32Array(CODE_LENGTH);
+      if (window.crypto && window.crypto.getRandomValues) window.crypto.getRandomValues(arr);
+      else for (let i = 0; i < CODE_LENGTH; i++) arr[i] = Math.floor(Math.random() * 0xffffffff);
+      let code = String(1 + (arr[0] % 9));
+      for (let i = 1; i < CODE_LENGTH; i++) code += String(arr[i] % 10);
+      return code;
+    }
+
+    function extractCode(input) {
+      const s = String(input || "").trim();
+      const m = s.match(CODE_RE_SEARCH);
+      return m ? m[1] : null;
+    }
+
+    /* ---- Derive the session key from the pairing code ---- */
+    async function setupKeyFromCode(code) {
+      if (hasSubtleCrypto()) {
+        try {
+          const enc = new TextEncoder();
+          const baseKey = await crypto.subtle.importKey(
+            "raw", enc.encode(code), "PBKDF2", false, ["deriveKey"]
+          );
+          aesKey = await crypto.subtle.deriveKey(
+            { name: "PBKDF2", salt: enc.encode(KEY_SALT), iterations: PBKDF2_ITERATIONS, hash: "SHA-256" },
+            baseKey,
+            { name: "AES-GCM", length: 256 },
+            true,
+            ["encrypt", "decrypt"]
+          );
+          const raw = await crypto.subtle.exportKey("raw", aesKey);
+          rawKeyBytes = new Uint8Array(raw);
+          rawKeyBase64 = bufToBase64Url(rawKeyBytes);
+          return;
+        } catch (e) {
+          console.warn("WebCrypto key derivation failed, using fallback:", e);
+        }
+      }
+      rawKeyBytes = fallbackDeriveKey(code);
+      rawKeyBase64 = bufToBase64Url(rawKeyBytes);
+      aesKey = null;
+    }
+
+    function fallbackDeriveKey(code) {
+      // Very small FNV-style expansion — only used when subtle crypto is unavailable.
+      const seed = new TextEncoder().encode(code + "|" + KEY_SALT);
+      const out = new Uint8Array(32);
+      let h = 2166136261;
+      for (let i = 0; i < seed.length; i++) { h ^= seed[i]; h = Math.imul(h, 16777619); }
+      for (let i = 0; i < 32; i++) {
+        h ^= i; h = Math.imul(h, 16777619);
+        out[i] = (h >>> 24) & 0xff;
+      }
+      return out;
+    }
+
+    async function encryptChunk(iv, plainBuffer) {
+      if (aesKey && hasSubtleCrypto()) {
+        return crypto.subtle.encrypt({ name: "AES-GCM", iv }, aesKey, plainBuffer);
+      }
+      return jsStreamCipher(rawKeyBytes, iv, plainBuffer);
+    }
+
+    async function decryptChunk(iv, cipherBuffer) {
+      if (aesKey && hasSubtleCrypto()) {
+        return crypto.subtle.decrypt({ name: "AES-GCM", iv }, aesKey, cipherBuffer);
+      }
+      return jsStreamCipher(rawKeyBytes, iv, cipherBuffer);
+    }
+
+    /********************************************************************
+     * BOOT / PAIRING
+     ********************************************************************/
+    async function initZeroDrop() {
+      initTheme();
+      applyCodeLengthToDOM();
+      loadSignalSettings();
+
+      const hashParams = parseHash(window.location.hash);
+      if (hashParams.code) {
+        await joinWithCode(hashParams.code, true);
+      } else {
+        await hostWithNewCode();
+      }
+    }
+
+    /* Keep the DOM in sync with CODE_LENGTH (input length, placeholder, etc.) */
+    function applyCodeLengthToDOM() {
+      const joinInput = document.getElementById("joinInput");
+      if (joinInput) {
+        joinInput.maxLength = CODE_LENGTH;
+        joinInput.placeholder = "0".repeat(CODE_LENGTH);
+        joinInput.oninput = function () {
+          this.value = this.value.replace(/[^0-9]/g, "").slice(0, CODE_LENGTH);
+        };
+      }
+    }
+
+    function parseHash(inputStr) {
+      const str = (inputStr || "").trim();
+      if (!str) return { code: null };
+      const hashIdx = str.indexOf("#");
+      const cleaned = hashIdx !== -1 ? str.substring(hashIdx + 1) : str.replace(/^#/, "");
+      const params = new URLSearchParams(cleaned);
+      let code = params.get("code");
+      if (!code) code = extractCode(str);
+      return { code: code && CODE_RE_EXACT.test(code) ? code : null };
+    }
+
+    async function hostWithNewCode() {
+      isHostRole = true;
+      roomCode = generateRoomCode();
+      roomId = roomIdFromCode(roomCode);
+      signalRetries = 0;
+      await setupKeyFromCode(roomCode);
+      updateShareUI();
+      startPeer(true, roomId);
+    }
+
+    async function joinWithCode(code, silent) {
+      isHostRole = false;
+      signalRetries = 0;
+      roomCode = code;
+      roomId = roomIdFromCode(code);
+      await setupKeyFromCode(code);
+      updateShareUI();
+      startPeer(false, roomId);
+      if (!silent) setJoinHint(`Looking for device ${code}…`);
+    }
+
+    async function regenerateCode() {
+      if (isSending) return alert("A transfer is in progress.");
+      teardownPeer();
+      setChannelState("Waiting for peer…");
+      await hostWithNewCode();
+      setJoinHint(null);
+    }
+
+    function getShareUrl() {
+      const hash = `#code=${encodeURIComponent(roomCode)}`;
+      if (location.protocol === "http:" || location.protocol === "https:") {
+        return `${location.origin}${location.pathname}${hash}`;
+      }
+      return roomCode; // file:// → QR just contains the plain code
+    }
+
+    function updateShareUI() {
+      renderCodeDisplay();
+      renderQR();
+    }
+
+    function renderCodeDisplay() {
+      const wrap = document.getElementById("codeDisplay");
+      if (!wrap) return;
+      const display = roomCode || "-".repeat(CODE_LENGTH);
+      const chars = display.split("");
+
+      // Adapt tile size so longer codes still fit on small screens.
+      const sizeCls = CODE_LENGTH <= 6
+        ? "w-9 h-11 sm:w-10 sm:h-12 text-xl sm:text-2xl"
+        : (CODE_LENGTH <= 8
+            ? "w-7 h-10 sm:w-9 sm:h-11 text-lg sm:text-xl"
+            : "w-6 h-9 sm:w-8 sm:h-10 text-base sm:text-lg");
+
+      wrap.innerHTML = chars.map(d => `
+        <span class="${sizeCls} rounded-xl bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 flex items-center justify-center font-mono font-bold text-zinc-900 dark:text-white shadow-sm">${d}</span>
+      `).join("");
+    }
+
+    /********************************************************************
+     * QR CODE RENDERER
+     ********************************************************************/
+    function renderQR() {
+      const canvas = document.getElementById("qrCanvas");
+      if (!canvas || !roomCode) return;
+
+      const payload = getShareUrl();
+
+      if (typeof window.qrcode === "function") {
+        try {
+          const qr = window.qrcode(0, "M");
+          qr.addData(payload);
+          qr.make();
+
+          const n = qr.getModuleCount();
+          const margin = 4;
+          const scale = Math.max(4, Math.floor(200 / (n + margin * 2)));
+          const px = (n + margin * 2) * scale;
+
+          canvas.width = px;
+          canvas.height = px;
+          canvas.style.width = px + "px";
+          canvas.style.height = px + "px";
+
+          const ctx = canvas.getContext("2d");
+          ctx.fillStyle = "#ffffff";
+          ctx.fillRect(0, 0, px, px);
+          ctx.fillStyle = "#000000";
+
+          for (let r = 0; r < n; r++) {
+            for (let c = 0; c < n; c++) {
+              if (qr.isDark(r, c)) ctx.fillRect((c + margin) * scale, (r + margin) * scale, scale, scale);
+            }
+          }
+          return;
+        } catch (err) {
+          console.error("qrcode-generator error:", err);
+        }
+      }
+
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      img.onload = () => {
+        canvas.width = 200; canvas.height = 200;
+        canvas.style.width = "200px"; canvas.style.height = "200px";
+        const ctx = canvas.getContext("2d");
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, 200, 200);
+        ctx.drawImage(img, 8, 8, 184, 184);
+      };
+      img.src = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&ecc=M&data=${encodeURIComponent(payload)}`;
+    }
+
+    /********************************************************************
+     * CLIPBOARD
+     ********************************************************************/
+    async function copyCode() {
+      if (!roomCode) return;
+      const label = document.getElementById("copyCodeText");
+      const icon = document.getElementById("copyCodeIcon");
+
+      let copied = false;
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+        try { await navigator.clipboard.writeText(roomCode); copied = true; } catch {}
+      }
+      if (!copied) {
+        try {
+          const ta = document.createElement("textarea");
+          ta.value = roomCode;
+          ta.setAttribute("readonly", "");
+          ta.style.position = "fixed";
+          ta.style.top = "-9999px";
+          document.body.appendChild(ta);
+          ta.focus(); ta.select(); ta.setSelectionRange(0, roomCode.length);
+          copied = document.execCommand("copy");
+          document.body.removeChild(ta);
+        } catch {}
+      }
+
+      if (copied) {
+        if (label) label.textContent = "Copied!";
+        if (icon) icon.className = "fa-solid fa-check text-[10px] text-emerald-500";
+        setTimeout(() => {
+          if (label) label.textContent = "Copy code";
+          if (icon) icon.className = "fa-regular fa-copy text-[10px]";
+        }, 1600);
+      } else {
+        window.prompt("Your connect code:", roomCode);
+      }
+    }
+
+    /********************************************************************
+     * SIGNALING SETTINGS (optional self-hosted PeerJS for offline LAN)
+     ********************************************************************/
+    function loadSignalSettings() {
+      let stored = "";
+      try {
+        stored = localStorage.getItem("zd_signal_url") || "";
+        if (stored === OLD_DEFAULT_SIGNAL) { localStorage.removeItem("zd_signal_url"); stored = ""; }
+      } catch {}
+      const input = document.getElementById("signalUrlInput");
+      if (!input) return;
+      // Prefer the user's saved value; otherwise use the built-in default.
+      input.value = stored || DEFAULT_SIGNAL_URL;
+    }
+
+    function saveSignalSettings() {
+      const val = document.getElementById("signalUrlInput").value.trim();
+      try {
+        if (val) localStorage.setItem("zd_signal_url", val);
+        else localStorage.removeItem("zd_signal_url");
+      } catch {}
+      restartConnection();
+    }
+
+    function getPeerOptions() {
+      const opts = {
+        debug: 0,
+        config: {
+          iceServers: [
+            { urls: "stun:stun.l.google.com:19302" },
+            { urls: "stun:stun1.l.google.com:19302" },
+            { urls: "stun:stun2.l.google.com:19302" },
+            // Public TURN relay so devices on different networks / mobile data can still connect.
+            // Replace with your own TURN credentials for reliable production use.
+            { urls: "turn:openrelay.metered.ca:80",                 username: "openrelayproject", credential: "openrelayproject" },
+            { urls: "turn:openrelay.metered.ca:443",                username: "openrelayproject", credential: "openrelayproject" },
+            { urls: "turns:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" }
+          ]
+        }
+      };
+
+      let raw = "";
+      try { raw = localStorage.getItem("zd_signal_url") || ""; } catch {}
+      if (!raw) raw = DEFAULT_SIGNAL_URL;
+      if (raw === OLD_DEFAULT_SIGNAL) raw = "";
+
+      // Mixed-content guard: an HTTPS page cannot talk to an insecure http:// signaling server.
+      if (raw && location.protocol === "https:" && /^http:\/\//i.test(raw)) {
+        console.warn("Ignoring http:// signaling URL on an HTTPS page; using public PeerJS cloud.");
+        raw = "";
+      }
+
+      if (raw) {
+        try {
+          const u = new URL(raw);
+          opts.host = u.hostname;
+          opts.port = u.port ? parseInt(u.port, 10) : (u.protocol === "https:" ? 443 : 80);
+          opts.path = (u.pathname && u.pathname !== "/") ? u.pathname : "/";
+          opts.secure = u.protocol === "https:";
+        } catch {
+          console.warn("Invalid signaling URL:", raw);
+        }
+      }
+      return opts;
+    }
+
+    function restartConnection() {
+      teardownPeer();
+      setChannelState("Restarting…");
+      signalRetries = 0;
+      if (roomCode) {
+        roomId = roomIdFromCode(roomCode);
+        startPeer(isHostRole, roomId);
+      }
+    }
+
+    /********************************************************************
+     * PEERJS CONNECTION & WEBRTC DATA CHANNELS
+     ********************************************************************/
+    /* Tear a PeerJS instance down safely.
+       PeerJS emits "disconnected" from INSIDE destroy(), before it marks itself destroyed. A handler that
+       calls peer.reconnect() would therefore revive the peer and keep its ID registered on the signaling
+       server, so the next Peer with the same ID got "unavailable-id" and the host's code silently changed.
+       We flag the peer as dead first so none of its handlers act. */
+    function teardownPeer() {
+      clearTimeout(signalTimer); clearTimeout(linkTimer); clearTimeout(retryTimer);
+      if (peer) { peer._zdDead = true; try { peer.destroy(); } catch {} }
+      peer = null; controlConn = null; stripeChannels = [];
+      updateChannelIndicators();
+      stopConnInfoPolling();
+    }
+
+    /* The PeerJS script tag in <head> uses unpkg; if that CDN is down/blocked try others. */
+    function loadPeerLib() {
+      if (peerLibPromise) return peerLibPromise;
+      const urls = [
+        "https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js",
+        "https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js",
+        "https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"
+      ];
+      peerLibPromise = new Promise((resolve, reject) => {
+        let i = 0;
+        const next = () => {
+          if (typeof Peer !== "undefined") return resolve();
+          if (i >= urls.length) { peerLibPromise = null; return reject(new Error("PeerJS failed to load")); }
+          const el = document.createElement("script");
+          el.src = urls[i++];
+          el.onload = () => (typeof Peer !== "undefined" ? resolve() : next());
+          el.onerror = next;
+          document.head.appendChild(el);
+        };
+        next();
+      });
+      return peerLibPromise;
+    }
+
+    function scheduleSignalRetry(isHost, id, reason) {
+      teardownPeer();
+      if (signalRetries >= SIGNAL_MAX_RETRIES) {
+        setBadge("Offline", "amber");
+        setChannelState("Signaling unreachable");
+        setJoinHint(reason + ". Check your internet connection (or VPN/ad-blocker), then press Connect or New to try again.", true);
+        return;
+      }
+      signalRetries++;
+      setBadge("Retrying…", "amber");
+      setChannelState(reason + " — retry " + signalRetries + "/" + SIGNAL_MAX_RETRIES);
+      retryTimer = setTimeout(() => startPeer(isHost, id), 1500 * signalRetries);
+    }
+
+    function startPeer(isHost, targetRoomId) {
+      const gen = ++startGen;
+
+      if (typeof Peer === "undefined") {
+        setBadge("Loading…", "zinc");
+        setChannelState("Loading networking library…");
+        loadPeerLib().then(() => { if (gen === startGen) launchPeer(isHost, targetRoomId); })
+                     .catch(() => {
+                       if (gen !== startGen) return;
+                       setBadge("Offline", "amber");
+                       setChannelState("PeerJS library failed to load");
+                       setJoinHint("Couldn't load the PeerJS library from any CDN. Check your internet / ad-blocker and reload.", true);
+                     });
+        return;
+      }
+      launchPeer(isHost, targetRoomId);
+    }
+
+    function launchPeer(isHost, targetRoomId) {
+      setBadge("Signaling…", "zinc");
+
+      const myPeerId = isHost
+        ? targetRoomId
+        : "zd-peer-" + Math.random().toString(36).substring(2, 10);
+
+      let me;
+      try {
+        me = new Peer(myPeerId, getPeerOptions());
+      } catch (e) {
+        console.error("Peer() failed:", e);
+        setBadge("Offline", "amber");
+        setChannelState("Networking unavailable here");
+        return;
+      }
+      peer = me;
+      let didOpen = false;
+      const alive = () => peer === me && !me._zdDead;
+
+      // Signaling server that never answers -> say so and retry instead of hanging on "Signaling…".
+      signalTimer = setTimeout(() => {
+        if (alive() && !didOpen) scheduleSignalRetry(isHost, targetRoomId, "Signaling server not responding");
+      }, SIGNAL_TIMEOUT_MS);
+
+      me.on("open", () => {
+        if (!alive()) return;
+        if (didOpen) {                       // signaling socket came back after a drop: don't re-dial
+          if (!(controlConn && controlConn.open)) setBadge(isHost ? "Waiting" : "Joining…", "amber");
+          return;
+        }
+        didOpen = true;
+        clearTimeout(signalTimer);
+        signalRetries = 0;
+        if (isHost) {
+          setBadge("Waiting", "amber");
+          setChannelState("Share the code to connect");
+        } else {
+          setBadge("Joining…", "amber");
+          setChannelState("Connecting to " + targetRoomId.replace(/^zd-/, "") + "…");
+          const conn = me.connect(targetRoomId, { reliable: true, serialization: "binary" });
+          bindControlConnection(conn);
+        }
+      });
+
+      me.on("connection", (c) => { if (alive()) bindControlConnection(c); });
+
+      me.on("error", (err) => {
+        if (!alive()) return;
+        console.warn("PeerJS error:", err.type, err);
+        if (err.type === "peer-unavailable") {
+          setBadge("Not found", "rose");
+          setChannelState("No device with that code");
+          setJoinHint("No device is listening on that code. Check it, make sure the other device's page is open, and try again.", true);
+        } else if (err.type === "unavailable-id" && isHost) {
+          regenerateCode();
+        } else if (["network", "server-error", "socket-error", "socket-closed"].includes(err.type)) {
+          if (!didOpen) scheduleSignalRetry(isHost, targetRoomId, "Signaling server unreachable");
+          else { setBadge("Reconnecting…", "amber"); setChannelState("Signaling connection lost"); }
+        } else {
+          setBadge("Offline", "amber");
+          setChannelState("Signaling error (" + err.type + ")");
+          setJoinHint("Connection error: " + err.type + (err.message ? " — " + err.message : ""), true);
+        }
+      });
+
+      me.on("disconnected", () => {
+        if (!alive() || !didOpen) return;    // before first open the error/timeout path handles retries
+        if (!(controlConn && controlConn.open)) setBadge("Reconnecting…", "amber");
+        const attempt = (n) => {
+          if (!alive() || !me.disconnected || n > 10) return;
+          try { me.reconnect(); } catch {}
+          retryTimer = setTimeout(() => attempt(n + 1), Math.min(1000 * (n + 1), 5000));
+        };
+        retryTimer = setTimeout(() => attempt(0), 500);
+      });
+    }
+
+    function bindControlConnection(conn) {
+      controlConn = conn;
+      setChannelState("Establishing 4 channels…");
+
+      // Peers found each other but the WebRTC link never completes (NAT/firewall/VPN, no working TURN).
+      clearTimeout(linkTimer);
+      linkTimer = setTimeout(() => {
+        if (controlConn !== conn) return;
+        const ready = stripeChannels.filter(c => c && c.readyState === "open").length;
+        if (ready === PARALLEL_CHANNELS) return;
+        const st = conn.peerConnection ? conn.peerConnection.iceConnectionState : "unknown";
+        setBadge("Blocked", "rose");
+        setChannelState("Direct link failed (" + st + ")");
+        setJoinHint("Found the other device but couldn't open a direct link (network/firewall). Try the same Wi‑Fi, turn off any VPN, or configure a TURN server.", true);
+      }, LINK_TIMEOUT_MS);
+
+      conn.on("open", () => {
+        setJoinHint(null);
+        setupParallelStripeChannels(conn.peerConnection);
+      });
+      conn.on("data", handleControlMessage);
+      conn.on("error", (e) => { setChannelState("Connection error: " + ((e && (e.type || e.message)) || "unknown")); });
+      conn.on("close", () => {
+        if (controlConn !== conn) return;
+        setBadge("Disconnected", "rose");
+        setChannelState("Peer disconnected");
+        stripeChannels = [];
+        updateChannelIndicators();
+        stopConnInfoPolling();
+      });
+    }
+
+    function setupParallelStripeChannels(pc) {
+      if (!pc) return;
+      stripeChannels = [];
+      channelChunkCounts = [0, 0, 0, 0];
+
+      for (let i = 0; i < PARALLEL_CHANNELS; i++) {
+        const dc = pc.createDataChannel(`zd-stripe-${i}`, {
+          ordered: false,
+          negotiated: true,
+          id: 100 + i
+        });
+
+        dc.binaryType = "arraybuffer";
+        try { dc.bufferedAmountLowThreshold = LOW_WATER_MARK; } catch {}
+
+        dc.onopen = () => {
+          updateChannelIndicators();
+          const openCount = stripeChannels.filter(c => c && c.readyState === "open").length;
+          if (openCount === PARALLEL_CHANNELS) {
+            clearTimeout(linkTimer);
+            setJoinHint(null);
+            setBadge("Connected", "emerald");
+            setChannelState("Ready · 4 channels active");
+            startConnInfoPolling();
+          }
+        };
+        dc.onmessage = (e) => handleStripePacket(e.data, i);
+        dc.onclose = updateChannelIndicators;
+
+        stripeChannels.push(dc);
+      }
+      updateChannelIndicators();
+    }
+
+    function updateChannelIndicators() {
+      for (let i = 0; i < PARALLEL_CHANNELS; i++) {
+        const dc = stripeChannels[i];
+        const dot = document.getElementById(`chDot${i}`);
+        if (!dot) continue;
+        const open = dc && dc.readyState === "open";
+        dot.className = open
+          ? "w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,.9)]"
+          : "w-1.5 h-1.5 rounded-full bg-zinc-600";
+      }
+    }
+
+    /********************************************************************
+     * CONNECTION PATH INSPECTOR (LAN / P2P / Relay)
+     ********************************************************************/
+    function startConnInfoPolling() {
+      stopConnInfoPolling(true);
+      connInfoTimer = setInterval(refreshConnectionInfo, 2500);
+      refreshConnectionInfo();
+    }
+
+    function stopConnInfoPolling(keepTimer) {
+      if (connInfoTimer) { clearInterval(connInfoTimer); connInfoTimer = null; }
+      if (!keepTimer) {
+        const el = document.getElementById("connInfo");
+        if (el) el.classList.add("hidden");
+      }
+    }
+
+    async function refreshConnectionInfo() {
+      const el = document.getElementById("connInfo");
+      if (!el) return;
+      const pc = controlConn && controlConn.peerConnection;
+      if (!pc) { el.classList.add("hidden"); return; }
+
+      try {
+        const stats = await pc.getStats();
+        const byId = new Map();
+        stats.forEach(r => byId.set(r.id, r));
+
+        let pairId = null;
+        stats.forEach(r => {
+          if (r.type === "transport" && r.selectedCandidatePairId) pairId = r.selectedCandidatePairId;
+        });
+
+        let pair = pairId ? byId.get(pairId) : null;
+        if (!pair) {
+          stats.forEach(r => {
+            if (r.type === "candidate-pair" && r.state === "succeeded" && r.nominated) pair = r;
+          });
+        }
+        if (!pair) { el.classList.add("hidden"); return; }
+
+        const local = byId.get(pair.localCandidateId);
+        const remote = byId.get(pair.remoteCandidateId);
+        if (!local || !remote) { el.classList.add("hidden"); return; }
+
+        const lt = local.candidateType;
+        const rt = remote.candidateType;
+        const viaLan = (lt === "host" && rt === "host");
+
+        let label, cls;
+        if (viaLan) {
+          label = `⚡ Local network (Wi‑Fi) · direct device-to-device`;
+          cls = "bg-emerald-500/10 text-emerald-500 border-emerald-500/25 dark:text-emerald-400";
+        } else if (lt === "relay" || rt === "relay") {
+          label = `↻ Relayed via TURN · ${lt}/${rt}`;
+          cls = "bg-amber-500/10 text-amber-600 border-amber-500/25 dark:text-amber-400";
+        } else {
+          label = `↔ Direct P2P · ${lt}/${rt}`;
+          cls = "bg-sky-500/10 text-sky-600 border-sky-500/25 dark:text-sky-400";
+        }
+
+        el.textContent = label;
+        el.className = `mb-3 text-[10px] font-mono px-2.5 py-1.5 rounded-lg border ${cls}`;
+        el.classList.remove("hidden");
+      } catch {
+        el.classList.add("hidden");
+      }
+    }
+
+    /********************************************************************
+     * SENDER — PIPELINED ENCRYPTION + 4-WAY STRIPING
+     ********************************************************************/
+    async function handleP2PFileSelect(files) {
+      if (!files || !files.length) return;
+      if (isSending) return alert("A transfer is already in progress.");
+
+      const ready = stripeChannels.filter(c => c && c.readyState === "open").length;
+      if (ready === 0) {
+        alert("Not connected yet. Enter the other device's code (or have them enter yours) first.");
+        return;
+      }
+      await stripeEncryptedFile(files[0]);
+    }
+
+    function pickLeastLoadedChannel() {
+      let best = -1, lowest = Infinity;
+      for (let i = 0; i < stripeChannels.length; i++) {
+        const dc = stripeChannels[i];
+        if (dc && dc.readyState === "open" && dc.bufferedAmount < lowest) {
+          lowest = dc.bufferedAmount;
+          best = i;
+        }
+      }
+      return best;
+    }
+
+    function waitForDrain() {
+      return new Promise((resolve) => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          for (const dc of stripeChannels) if (dc) dc.onbufferedamountlow = null;
+          resolve();
+        };
+
+        const open = stripeChannels.filter(dc => dc && dc.readyState === "open");
+        if (!open.length) { setTimeout(finish, 60); return; }
+        if (open.some(dc => dc.bufferedAmount < HIGH_WATER_MARK)) { finish(); return; }
+
+        for (const dc of open) {
+          try { dc.bufferedAmountLowThreshold = LOW_WATER_MARK; } catch {}
+          dc.onbufferedamountlow = finish;
+        }
+        setTimeout(finish, MAX_DRAIN_WAIT_MS);
+      });
+    }
+
+    function flushChannels() {
+      return new Promise((resolve) => {
+        const t0 = performance.now();
+        const tick = () => {
+          const busy = stripeChannels.some(dc => dc && dc.readyState === "open" && dc.bufferedAmount > 0);
+          if (transferAborted || !busy || performance.now() - t0 > 60000) resolve();
+          else setTimeout(tick, 50);
+        };
+        tick();
+      });
+    }
+
+    async function stripeEncryptedFile(file) {
+      isSending = true;
+      transferAborted = false;
+      channelChunkCounts = [0, 0, 0, 0];
+      updateChannelIndicators();
+
+      const randArr = new Uint32Array(1);
+      if (window.crypto && window.crypto.getRandomValues) window.crypto.getRandomValues(randArr);
+      else randArr[0] = Math.floor(Math.random() * 0xffffffff);
+
+      const tid = randArr[0] >>> 0;
+      currentSendId = tid;
+      const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
+      const startTime = performance.now();
+
+      try {
+        if (!controlConn || !controlConn.open) throw new Error("Control connection is not open");
+        controlConn.send(JSON.stringify({
+          type: "meta",
+          tid,
+          name: file.name,
+          size: file.size,
+          mime: file.type || "application/octet-stream",
+          totalChunks
+        }));
+
+        showTelemetry("SENDING", file.name, file.size);
+
+        const pending = new Map();
+        const prepare = (idx) => {
+          const start = idx * CHUNK_SIZE;
+          const end = Math.min(start + CHUNK_SIZE, file.size);
+          return (async () => {
+            const plain = await file.slice(start, end).arrayBuffer();
+            const iv = getRandomBytes(12);
+            const cipher = await encryptChunk(iv, plain);
+            const packet = new Uint8Array(HEADER_SIZE + cipher.byteLength);
+            const dv = new DataView(packet.buffer);
+            dv.setUint32(0, tid, false);
+            dv.setUint32(4, idx, false);
+            packet.set(iv, 8);
+            packet.set(new Uint8Array(cipher), HEADER_SIZE);
+            return { packet, bytes: plain.byteLength };
+          })();
+        };
+
+        for (let i = 0; i < Math.min(PIPELINE_DEPTH, totalChunks); i++) pending.set(i, prepare(i));
+
+        let bytesSent = 0;
+        let lastUi = 0;
+
+        for (let idx = 0; idx < totalChunks; idx++) {
+          if (transferAborted) break;
+
+          let target = pickLeastLoadedChannel();
+          let guard = 0;
+
+          while ((target === -1 || stripeChannels[target].bufferedAmount >= HIGH_WATER_MARK) && guard++ < 600) {
+            if (transferAborted) break;
+            await waitForDrain();
+            target = pickLeastLoadedChannel();
+          }
+
+          if (transferAborted) break;
+          if (target === -1) throw new Error("All channels closed");
+          const dc = stripeChannels[target];
+
+          const item = pending.get(idx);
+          if (!item) break;
+          const { packet, bytes } = await item;
+          pending.delete(idx);
+          if (transferAborted) break;
+
+          const next = idx + PIPELINE_DEPTH;
+          if (next < totalChunks) pending.set(next, prepare(next));
+
+          if (dc.readyState !== "open") throw new Error("Channel closed mid-transfer");
+          dc.send(packet);
+          channelChunkCounts[target]++;
+          bytesSent += bytes;
+
+          const now = performance.now();
+          if (now - lastUi > 100 || idx === totalChunks - 1) {
+            updateTelemetry(bytesSent, file.size, startTime);
+            updateChannelIndicators();
+            lastUi = now;
+          }
+        }
+
+        if (!transferAborted) {
+          await flushChannels();
+          if (!transferAborted) appendHistory("Sent", file.name, file.size, null);
+        }
+      } catch (err) {
+        console.error(err);
+        if (!transferAborted) {
+          transferAborted = true;
+          appendHistory("Failed", file.name, 0, null);
+        }
+      } finally {
+        isSending = false;
+        lastClosedId = tid;
+        document.getElementById("transferBox").classList.add("hidden");
+      }
+    }
+
+    /********************************************************************
+     * RECEIVER — OUT-OF-ORDER REASSEMBLY & CANCELLATION
+     ********************************************************************/
+    function handleControlMessage(data) {
+      let msg = data;
+      if (typeof data === "string") {
+        try { msg = JSON.parse(data); } catch { return; }
+      }
+      if (!msg) return;
+
+      if (msg.type === "cancel") {
+        if (isSending && msg.tid === currentSendId) transferAborted = true;
+        if (incomingMeta && incomingMeta.tid === msg.tid) resetTransferState();
+        lastClosedId = msg.tid;
+        document.getElementById("transferBox").classList.add("hidden");
+        appendHistory("Cancelled", "Transfer cancelled by peer", 0, null);
+        return;
+      }
+
+      if (msg.type === "meta") {
+        incomingMeta = msg;
+        incomingChunks = new Array(msg.totalChunks);
+        receivedChunkCount = 0;
+        incomingBytes = 0;
+        incomingStartTime = performance.now();
+        channelChunkCounts = [0, 0, 0, 0];
+        updateChannelIndicators();
+        showTelemetry("RECEIVING", msg.name, msg.size);
+
+        if (pendingPackets.length) {
+          const queued = pendingPackets;
+          pendingPackets = [];
+          queued.forEach(p => handleStripePacket(p.buffer, p.channelIdx));
+        }
+      }
+    }
+
+    async function handleStripePacket(rawData, channelIdx) {
+      const buffer = rawData instanceof ArrayBuffer ? rawData : await rawData.arrayBuffer();
+      if (buffer.byteLength < HEADER_SIZE) return;
+
+      const view = new DataView(buffer);
+      const tid = view.getUint32(0, false);
+      if (tid === lastClosedId) return;
+
+      if (!incomingMeta) {
+        if (pendingPackets.length < 256) pendingPackets.push({ buffer, channelIdx });
+        return;
+      }
+      if (tid !== incomingMeta.tid) return;
+
+      const meta = incomingMeta;
+      const chunkIndex = view.getUint32(4, false);
+      if (chunkIndex >= meta.totalChunks) return;
+
+      const iv = new Uint8Array(buffer.slice(8, 20));
+      const ciphertext = buffer.slice(HEADER_SIZE);
+
+      let plain;
+      try {
+        plain = await decryptChunk(iv, ciphertext);
+      } catch {
+        return;
+      }
+
+      if (incomingMeta !== meta) return;
+
+      if (incomingChunks[chunkIndex] === undefined) {
+        incomingChunks[chunkIndex] = plain;
+        receivedChunkCount++;
+        incomingBytes += plain.byteLength;
+        channelChunkCounts[channelIdx]++;
+      }
+
+      if (receivedChunkCount % 8 === 0 || receivedChunkCount === meta.totalChunks) {
+        updateTelemetry(incomingBytes, meta.size, incomingStartTime);
+        updateChannelIndicators();
+      }
+
+      if (receivedChunkCount === meta.totalChunks) {
+        const chunks = incomingChunks;
+        lastClosedId = meta.tid;
+        incomingMeta = null;
+        incomingChunks = [];
+        pendingPackets = [];
+
+        const blob = new Blob(chunks, { type: meta.mime });
+        const url = URL.createObjectURL(blob);
+        triggerDownload(url, meta.name);
+        appendHistory("Received", meta.name, meta.size, url);
+        document.getElementById("transferBox").classList.add("hidden");
+      }
+    }
+
+    function cancelTransfer() {
+      const tid = isSending ? currentSendId : (incomingMeta ? incomingMeta.tid : null);
+      transferAborted = true;
+      if (tid !== null) {
+        lastClosedId = tid;
+        if (controlConn && controlConn.open) controlConn.send(JSON.stringify({ type: "cancel", tid }));
+      }
+      resetTransferState();
+      appendHistory("Cancelled", "Transfer cancelled", 0, null);
+    }
+
+    function resetTransferState() {
+      incomingMeta = null;
+      incomingChunks = [];
+      pendingPackets = [];
+      receivedChunkCount = 0;
+      incomingBytes = 0;
+      document.getElementById("transferBox").classList.add("hidden");
+    }
+
+    /********************************************************************
+     * OFFLINE VAULT
+     ********************************************************************/
+    function handleVaultFileSelect(files) {
+      if (!files || !files.length) return;
+      selectedVaultFile = files[0];
+      document.getElementById("vaultFileLabel").textContent = selectedVaultFile.name;
+      document.getElementById("vaultFileMeta").textContent = `${formatBytes(selectedVaultFile.size)} · ready`;
+      document.getElementById("vaultStatus").classList.add("hidden");
+    }
+
+    function togglePasswordVisibility() {
+      const input = document.getElementById("vaultPassword");
+      const icon = document.getElementById("pwToggleIcon");
+      if (input.type === "password") {
+        input.type = "text";
+        icon.className = "fa-solid fa-eye-slash text-xs";
+      } else {
+        input.type = "password";
+        icon.className = "fa-regular fa-eye text-xs";
+      }
+    }
+
+    async function deriveVaultKey(password, salt) {
+      const baseKey = await crypto.subtle.importKey(
+        "raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveKey"]
+      );
+      return crypto.subtle.deriveKey(
+        { name: "PBKDF2", salt, iterations: 100000, hash: "SHA-256" },
+        baseKey,
+        { name: "AES-GCM", length: 256 },
+        false,
+        ["encrypt", "decrypt"]
+      );
+    }
+
+    function deriveFallbackBytes(password, salt) {
+      const pwBytes = new TextEncoder().encode(password);
+      const out = new Uint8Array(32);
+      for (let i = 0; i < 32; i++) {
+        out[i] = (pwBytes[i % pwBytes.length] ^ salt[i % salt.length] ^ ((i * 31) & 0xff));
+      }
+      return out;
+    }
+
+    async function processVault(mode) {
+      const password = document.getElementById("vaultPassword").value;
+      if (!selectedVaultFile) return setVaultStatus("Choose a file first.", true);
+      if (!password || password.length < 4) return setVaultStatus("Passphrase must be at least 4 characters.", true);
+
+      try {
+        setVaultStatus(mode === "encrypt" ? "Encrypting…" : "Decrypting…", false);
+        const fileBuffer = await selectedVaultFile.arrayBuffer();
+
+        if (mode === "encrypt") {
+          const salt = getRandomBytes(16);
+          const iv = getRandomBytes(12);
+
+          const metaBytes = new TextEncoder().encode(JSON.stringify({
+            name: selectedVaultFile.name,
+            type: selectedVaultFile.type || "application/octet-stream"
+          }));
+
+          let encrypted;
+          if (hasSubtleCrypto()) {
+            const key = await deriveVaultKey(password, salt);
+            encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, fileBuffer);
+          } else {
+            const keyBytes = deriveFallbackBytes(password, salt);
+            encrypted = jsStreamCipher(keyBytes, iv, fileBuffer);
+          }
+
+          const out = new Uint8Array(4 + 16 + 12 + 2 + metaBytes.byteLength + encrypted.byteLength);
+          const view = new DataView(out.buffer);
+          out.set([0x5a, 0x44, 0x52, 0x50], 0); // "ZDRP"
+          out.set(salt, 4);
+          out.set(iv, 20);
+          view.setUint16(32, metaBytes.byteLength, false);
+          out.set(metaBytes, 34);
+          out.set(new Uint8Array(encrypted), 34 + metaBytes.byteLength);
+
+          const outFilename = selectedVaultFile.name.endsWith(".zkvault")
+            ? selectedVaultFile.name
+            : `${selectedVaultFile.name}.zkvault`;
+
+          triggerDownload(URL.createObjectURL(new Blob([out], { type: "application/octet-stream" })), outFilename);
+          setVaultStatus(`Locked and saved as ${outFilename}`, false);
+
+        } else {
+          const bytes = new Uint8Array(fileBuffer);
+          if (bytes.byteLength < 36 || String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]) !== "ZDRP") {
+            throw new Error("Not a valid .zkvault file.");
+          }
+
+          const view = new DataView(fileBuffer);
+          const salt = bytes.slice(4, 20);
+          const iv = bytes.slice(20, 32);
+          const metaLen = view.getUint16(32, false);
+          if (34 + metaLen > bytes.byteLength) throw new Error("Corrupted vault header.");
+
+          const meta = JSON.parse(new TextDecoder().decode(bytes.slice(34, 34 + metaLen)));
+          const ciphertext = fileBuffer.slice(34 + metaLen);
+
+          let decrypted;
+          if (hasSubtleCrypto()) {
+            const key = await deriveVaultKey(password, salt);
+            decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext);
+          } else {
+            const keyBytes = deriveFallbackBytes(password, salt);
+            decrypted = jsStreamCipher(keyBytes, iv, ciphertext);
+          }
+
+          triggerDownload(URL.createObjectURL(new Blob([decrypted], { type: meta.type || "application/octet-stream" })), meta.name || "unlocked-file");
+          setVaultStatus(`Unlocked: ${meta.name}`, false);
+        }
+      } catch (err) {
+        console.error(err);
+        setVaultStatus(
+          mode === "decrypt" && err.message === "Not a valid .zkvault file."
+            ? "Selected file is not a .zkvault file."
+            : "Failed — wrong passphrase or corrupted file.",
+          true
+        );
+      }
+    }
+
+    /********************************************************************
+     * UI HELPERS
+     ********************************************************************/
+    const TAB_ACTIVE   = "flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition bg-white dark:bg-zinc-100 text-zinc-900 dark:text-zinc-950 shadow-sm";
+    const TAB_INACTIVE = "flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white";
+
+    function switchTab(tab) {
+      const isP2P = tab === "p2p";
+      document.getElementById("viewP2P").classList.toggle("hidden", !isP2P);
+      document.getElementById("viewVault").classList.toggle("hidden", isP2P);
+      document.getElementById("tabP2P").className = isP2P ? TAB_ACTIVE : TAB_INACTIVE;
+      document.getElementById("tabVault").className = isP2P ? TAB_INACTIVE : TAB_ACTIVE;
+    }
+
+    function setBadge(text, color) {
+      const el = document.getElementById("p2pBadge");
+      if (!el) return;
+      el.textContent = text;
+      const palettes = {
+        amber:   "bg-zinc-800 text-amber-400 border-zinc-700",
+        zinc:    "bg-zinc-800 text-zinc-300 border-zinc-700",
+        emerald: "bg-zinc-800 text-emerald-400 border-zinc-700",
+        rose:    "bg-zinc-800 text-rose-400 border-zinc-700"
+      };
+      el.className = `text-[10px] font-mono px-2 py-0.5 rounded-full font-medium border ${palettes[color] || palettes.zinc}`;
+    }
+
+    function setChannelState(text) {
+      const el = document.getElementById("channelState");
+      if (el) el.textContent = text;
+    }
+
+    function setJoinHint(text, isError) {
+      const el = document.getElementById("joinHint");
+      if (!el) return;
+      if (!text) { el.classList.add("hidden"); return; }
+      el.textContent = text;
+      el.className = `text-[10px] mt-2 ${isError ? "text-rose-400" : "text-zinc-400 dark:text-zinc-500"}`;
+    }
+
+    function showTelemetry(direction, name, totalBytes) {
+      document.getElementById("transferBox").classList.remove("hidden");
+      document.getElementById("transferDirection").textContent = direction;
+      document.getElementById("transferFileName").textContent = name;
+      updateTelemetry(0, totalBytes, performance.now());
+    }
+
+    function updateTelemetry(doneBytes, totalBytes, startTime) {
+      const pct = totalBytes > 0 ? Math.min(100, Math.round((doneBytes / totalBytes) * 100)) : 100;
+      const elapsed = Math.max(0.05, (performance.now() - startTime) / 1000);
+
+      document.getElementById("transferPercent").textContent = `${pct}%`;
+      document.getElementById("transferBar").style.width = `${pct}%`;
+      document.getElementById("statSpeed").textContent = `${((doneBytes / 1048576) / elapsed).toFixed(1)} MB/s`;
+      document.getElementById("statBytes").textContent =
+        `${(doneBytes / 1048576).toFixed(1)} / ${(totalBytes / 1048576).toFixed(1)} MB`;
+    }
+
+    function appendHistory(action, name, size, blobUrl) {
+      const container = document.getElementById("fileHistory");
+      const placeholder = container.querySelector(".italic");
+      if (placeholder) placeholder.remove();
+
+      const row = document.createElement("div");
+      row.className = "flex items-center justify-between bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800/80 rounded-xl px-3 py-2 text-xs";
+
+      const safeName = name.replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+
+      row.innerHTML = `
+        <div class="truncate pr-2">
+          <span class="font-mono text-[10px] uppercase font-bold px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 mr-1.5">${action}</span>
+          <span class="font-semibold text-zinc-800 dark:text-zinc-200">${safeName}</span>
+          ${size > 0 ? `<span class="text-zinc-400 ml-1">(${formatBytes(size)})</span>` : ''}
+        </div>
+        ${blobUrl
+          ? `<a href="${blobUrl}" download="${safeName}" class="text-emerald-400 font-semibold shrink-0 hover:underline">Save</a>`
+          : `<span class="text-zinc-400 font-mono text-[11px] shrink-0">${action === 'Cancelled' || action === 'Failed' ? '✕' : '✓'}</span>`}
+      `;
+      container.prepend(row);
+    }
+
+    function setVaultStatus(msg, isError) {
+      const el = document.getElementById("vaultStatus");
+      el.classList.remove("hidden");
+      el.textContent = msg;
+      el.className = `text-xs font-mono text-center py-2.5 px-3 rounded-xl border ${
+        isError
+          ? "bg-rose-500/10 text-rose-400 border-rose-500/20"
+          : "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
+      }`;
+    }
+
+    async function manualJoin() {
+      const input = document.getElementById("joinInput");
+      const code = extractCode(input.value);
+      if (!code) {
+        setJoinHint(`Enter the ${CODE_LENGTH}-digit code shown on the other device.`, true);
+        input.focus();
+        return;
+      }
+
+      setJoinHint(`Connecting to ${code}…`);
+      teardownPeer();
+
+      try { history.replaceState(null, "", `#code=${code}`); } catch { window.location.hash = `#code=${code}`; }
+
+      await joinWithCode(code, true);
+    }
+
+    function triggerDownload(url, filename) {
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }
+
+    function formatBytes(bytes) {
+      if (bytes < 1024) return bytes + " B";
+      if (bytes < 1048576) return (bytes / 1024).toFixed(1) + " KB";
+      return (bytes / 1048576).toFixed(2) + " MB";
+    }
+
+    /********************************************************************
+     * DRAG & DROP + BOOT
+     ********************************************************************/
+    ["p2pDropzone", "vaultDropzone"].forEach(id => {
+      const zone = document.getElementById(id);
+      if (!zone) return;
+      zone.addEventListener("dragover", e => { e.preventDefault(); zone.classList.add("dropzone-active"); });
+      zone.addEventListener("dragleave", () => zone.classList.remove("dropzone-active"));
+      zone.addEventListener("drop", e => {
+        e.preventDefault();
+        zone.classList.remove("dropzone-active");
+        if (id === "p2pDropzone") handleP2PFileSelect(Array.from(e.dataTransfer.files));
+        else handleVaultFileSelect(Array.from(e.dataTransfer.files));
+      });
+    });
+
+    ["dragover", "drop"].forEach(ev => window.addEventListener(ev, e => e.preventDefault()));
+
+    window.addEventListener("DOMContentLoaded", initZeroDrop);
+    window.addEventListener("load", renderQR);
+  </script>
+</body>
+</html>
