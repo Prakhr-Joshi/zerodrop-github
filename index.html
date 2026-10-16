@@ -232,6 +232,17 @@
           <p class="text-xs text-zinc-500 dark:text-zinc-400 mt-1">or click to browse — any size</p>
         </label>
 
+        <!-- Incoming large file: choose where to save -->
+        <div id="incomingPrompt" class="mt-4 bg-emerald-500/5 border border-emerald-500/30 rounded-xl p-4 hidden">
+          <div class="text-[10px] font-mono font-bold uppercase tracking-wider text-emerald-400 mb-1">Incoming file</div>
+          <div id="incomingName" class="text-sm font-semibold text-zinc-900 dark:text-white truncate">file.bin</div>
+          <div id="incomingInfo" class="text-[11px] text-zinc-500 dark:text-zinc-400 mt-1 leading-relaxed"></div>
+          <div class="flex gap-2 mt-3">
+            <button id="incomingAccept" type="button" onclick="acceptIncoming()" class="text-xs font-semibold px-3 py-1.5 bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 border border-emerald-500/40 rounded-lg transition">Choose where to save</button>
+            <button type="button" onclick="declineIncoming()" class="text-xs font-semibold px-3 py-1.5 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 rounded-lg transition">Decline</button>
+          </div>
+        </div>
+
         <!-- Progress with Cancel Option -->
         <div id="transferBox" class="mt-4 bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-xl p-4 hidden">
           <div class="flex items-center justify-between mb-2 gap-3">
@@ -355,6 +366,17 @@
     const PIPELINE_DEPTH       = 32;
     const MAX_DRAIN_WAIT_MS    = 1200;
 
+    /* Large-file transfer: receiver acknowledgements, stall detection, streaming to disk */
+    const PROTO_VERSION        = 2;                 // v2 = hello / accept / ack handshake
+    const ACK_WINDOW_BYTES     = 32 * 1024 * 1024;  // sender never runs more than this far ahead of the receiver
+    const ACK_STEP_BYTES       = 4 * 1024 * 1024;   // receiver confirms progress every 4 MB
+    const STALL_TIMEOUT_MS     = 45000;             // sender gives up if nothing moves for this long
+    const RECV_STALL_MS        = 60000;             // receiver gives up if no data arrives for this long
+    const ACCEPT_TIMEOUT_MS    = 5 * 60 * 1000;     // how long the sender waits for the receiver to click Save
+    const DISK_MIN_BYTES       = 256 * 1024 * 1024; // >= this: stream straight to disk (Chrome / Edge)
+    const MEM_WARN_BYTES       = 1536 * 1024 * 1024;// >= this without disk streaming: ask first
+    const SEG_CHUNKS           = 512;               // in-memory fallback packs 512 chunks (32 MB) per Blob segment
+
     const KEY_SALT             = "ZeroDrop-P2P-v1";
 
     /********************************************************************
@@ -374,7 +396,11 @@
     let rawKeyBase64 = "";
 
     let incomingMeta = null;
-    let incomingChunks = [];
+    let pendingOffer = null;   // large offer waiting for the user to choose where to save
+    let incomingSink = null;   // where decrypted chunks go once the offer is accepted
+    let peerProto = 0;         // protocol version announced by the other device
+    let sendState = null;      // ack / accept bookkeeping for the file being sent
+    let wakeLock = null;
     let pendingPackets = [];
     let receivedChunkCount = 0;
     let incomingBytes = 0;
@@ -965,6 +991,7 @@
 
     function bindControlConnection(conn) {
       controlConn = conn;
+      peerProto = 0;
       setChannelState("Establishing 4 channels…");
 
       // Peers found each other but the WebRTC link never completes (NAT/firewall/VPN, no working TURN).
@@ -981,6 +1008,7 @@
 
       conn.on("open", () => {
         setJoinHint(null);
+        try { conn.send(JSON.stringify({ type: "hello", v: PROTO_VERSION })); } catch {}
         setupParallelStripeChannels(conn.peerConnection);
       });
       conn.on("data", handleControlMessage);
@@ -1171,6 +1199,37 @@
       });
     }
 
+    /* Screen wake lock: a phone that sleeps mid-transfer is the classic "stuck at 1%". */
+    async function acquireWakeLock() {
+      try { if (!wakeLock && navigator.wakeLock) wakeLock = await navigator.wakeLock.request("screen"); } catch {}
+    }
+    function releaseWakeLock() {
+      try { if (wakeLock) wakeLock.release(); } catch {}
+      wakeLock = null;
+    }
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible" && (isSending || incomingSink)) acquireWakeLock();
+    });
+
+    function sendCtl(obj) {
+      try { if (controlConn && controlConn.open) controlConn.send(JSON.stringify(obj)); } catch {}
+    }
+
+    /* Wait until the receiver sends something (accept / ack / decline / cancel) or `ms` elapses. */
+    function sendWait(ms) {
+      return new Promise((resolve) => {
+        const st = sendState;
+        const t = setTimeout(() => { if (st) st.notify = null; resolve(); }, ms);
+        if (st) st.notify = () => { clearTimeout(t); st.notify = null; resolve(); };
+      });
+    }
+
+    async function peerSupportsV2() {
+      const t0 = performance.now();
+      while (!peerProto && performance.now() - t0 < 1500) await new Promise(r => setTimeout(r, 50));
+      return peerProto >= 2;
+    }
+
     async function stripeEncryptedFile(file) {
       isSending = true;
       transferAborted = false;
@@ -1184,20 +1243,70 @@
       const tid = randArr[0] >>> 0;
       currentSendId = tid;
       const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
-      const startTime = performance.now();
+      let startTime = performance.now();
+      let v2 = false;
+      let bytesSent = 0;
+      let abortReason = "";
 
       try {
         if (!controlConn || !controlConn.open) throw new Error("Control connection is not open");
+
+        v2 = await peerSupportsV2();   // older cached copies of the page don't acknowledge; fall back for them
+        sendState = { tid, ackedBytes: 0, accepted: !v2, declined: false, notify: null };
+        acquireWakeLock();
+
         controlConn.send(JSON.stringify({
           type: "meta",
           tid,
           name: file.name,
           size: file.size,
           mime: file.type || "application/octet-stream",
-          totalChunks
+          totalChunks,
+          v: PROTO_VERSION
         }));
 
         showTelemetry("SENDING", file.name, file.size);
+
+        if (v2) {
+          document.getElementById("statSpeed").textContent = "Waiting for receiver…";
+          const t0 = performance.now();
+          while (!sendState.accepted && !sendState.declined && !transferAborted) {
+            if (!controlConn || !controlConn.open) { abortReason = "the other device disconnected"; throw new Error(abortReason); }
+            if (performance.now() - t0 > ACCEPT_TIMEOUT_MS) { abortReason = "the receiver didn't accept in time"; throw new Error(abortReason); }
+            await sendWait(1000);
+          }
+          if (sendState.declined) {
+            transferAborted = true;
+            appendHistory("Cancelled", file.name + " — declined by the receiver", 0, null);
+            return;
+          }
+          if (transferAborted) return;
+        }
+        startTime = performance.now();
+
+        /* ---- stall watchdog: progress = send buffers shrinking or the receiver acknowledging ---- */
+        let lastProgress = performance.now(), lastBuffered = Infinity, lastAcked = -1;
+        const totalBuffered = () => stripeChannels.reduce((n, dc) => n + (dc && dc.readyState === "open" ? dc.bufferedAmount : 0), 0);
+        const checkStall = () => {
+          const now = performance.now(), buf = totalBuffered(), acked = sendState.ackedBytes;
+          if (buf < lastBuffered || acked !== lastAcked) lastProgress = now;
+          lastBuffered = buf; lastAcked = acked;
+          if (now - lastProgress > STALL_TIMEOUT_MS) {
+            abortReason = "no data moved for " + Math.round(STALL_TIMEOUT_MS / 1000) + "s (connection lost or the other device froze)";
+            throw new Error(abortReason);
+          }
+        };
+
+        let lastUi = 0;
+        const uiTick = (force) => {
+          const now = performance.now();
+          if (force || now - lastUi > 100) {
+            // v2: show what the receiver has really stored, not what we merely queued
+            updateTelemetry(v2 ? sendState.ackedBytes : bytesSent, file.size, startTime);
+            updateChannelIndicators();
+            lastUi = now;
+          }
+        };
 
         const pending = new Map();
         const prepare = (idx) => {
@@ -1219,10 +1328,15 @@
 
         for (let i = 0; i < Math.min(PIPELINE_DEPTH, totalChunks); i++) pending.set(i, prepare(i));
 
-        let bytesSent = 0;
-        let lastUi = 0;
-
         for (let idx = 0; idx < totalChunks; idx++) {
+          if (transferAborted) break;
+
+          // Flow control: never get more than ACK_WINDOW_BYTES ahead of what the receiver has stored.
+          while (v2 && !transferAborted && bytesSent - sendState.ackedBytes >= ACK_WINDOW_BYTES) {
+            await sendWait(1000);
+            checkStall();
+            uiTick(false);
+          }
           if (transferAborted) break;
 
           let target = pickLeastLoadedChannel();
@@ -1231,6 +1345,7 @@
           while ((target === -1 || stripeChannels[target].bufferedAmount >= HIGH_WATER_MARK) && guard++ < 600) {
             if (transferAborted) break;
             await waitForDrain();
+            checkStall();
             target = pickLeastLoadedChannel();
           }
 
@@ -1252,34 +1367,46 @@
           channelChunkCounts[target]++;
           bytesSent += bytes;
 
-          const now = performance.now();
-          if (now - lastUi > 100 || idx === totalChunks - 1) {
-            updateTelemetry(bytesSent, file.size, startTime);
-            updateChannelIndicators();
-            lastUi = now;
-          }
+          uiTick(idx === totalChunks - 1 && !v2);
         }
 
         if (!transferAborted) {
-          await flushChannels();
-          if (!transferAborted) appendHistory("Sent", file.name, file.size, null);
+          if (v2) {
+            // Done sending; wait until the receiver confirms it has stored everything.
+            while (!transferAborted && sendState.ackedBytes < file.size) {
+              await sendWait(500);
+              checkStall();
+              uiTick(false);
+            }
+          } else {
+            await flushChannels();
+          }
+          if (!transferAborted) {
+            uiTick(true);
+            appendHistory("Sent", file.name, file.size, null);
+          }
         }
       } catch (err) {
         console.error(err);
         if (!transferAborted) {
           transferAborted = true;
-          appendHistory("Failed", file.name, 0, null);
+          appendHistory("Failed", abortReason ? file.name + " — " + abortReason : file.name, 0, null);
+          sendCtl({ type: "cancel", tid });   // let the receiver clean up too
         }
       } finally {
         isSending = false;
         lastClosedId = tid;
-        document.getElementById("transferBox").classList.add("hidden");
+        sendState = null;
+        if (!incomingSink) releaseWakeLock();
+        if (!incomingSink && !pendingOffer) document.getElementById("transferBox").classList.add("hidden");
       }
     }
 
     /********************************************************************
-     * RECEIVER — OUT-OF-ORDER REASSEMBLY & CANCELLATION
+     * RECEIVER — acknowledged, streams big files to disk
      ********************************************************************/
+    const HAS_FILE_PICKER = typeof window.showSaveFilePicker === "function";
+
     function handleControlMessage(data) {
       let msg = data;
       if (typeof data === "string") {
@@ -1287,31 +1414,185 @@
       }
       if (!msg) return;
 
-      if (msg.type === "cancel") {
-        if (isSending && msg.tid === currentSendId) transferAborted = true;
-        if (incomingMeta && incomingMeta.tid === msg.tid) resetTransferState();
-        lastClosedId = msg.tid;
-        document.getElementById("transferBox").classList.add("hidden");
-        appendHistory("Cancelled", "Transfer cancelled by peer", 0, null);
-        return;
+      const forMe = sendState && msg.tid === sendState.tid;
+
+      switch (msg.type) {
+        case "hello":
+          peerProto = msg.v | 0;
+          return;
+
+        case "accept":
+          if (forMe) { sendState.accepted = true; if (sendState.notify) sendState.notify(); }
+          return;
+
+        case "decline":
+          if (forMe) { sendState.declined = true; if (sendState.notify) sendState.notify(); }
+          return;
+
+        case "ack":
+          if (forMe && msg.bytes > sendState.ackedBytes) {
+            sendState.ackedBytes = msg.bytes;
+            if (sendState.notify) sendState.notify();
+          }
+          return;
+
+        case "cancel":
+          if (isSending && msg.tid === currentSendId) {
+            transferAborted = true;
+            if (sendState && sendState.notify) sendState.notify();
+          }
+          if (incomingMeta && incomingMeta.tid === msg.tid) resetTransferState();
+          lastClosedId = msg.tid;
+          if (!isSending) document.getElementById("transferBox").classList.add("hidden");
+          appendHistory("Cancelled", "Transfer cancelled by peer", 0, null);
+          return;
+
+        case "meta":
+          onIncomingMeta(msg);
+          return;
       }
+    }
 
-      if (msg.type === "meta") {
-        incomingMeta = msg;
-        incomingChunks = new Array(msg.totalChunks);
-        receivedChunkCount = 0;
-        incomingBytes = 0;
-        incomingStartTime = performance.now();
-        channelChunkCounts = [0, 0, 0, 0];
-        updateChannelIndicators();
-        showTelemetry("RECEIVING", msg.name, msg.size);
+    function onIncomingMeta(msg) {
+      disposeSink();                       // a newer offer replaces anything unfinished
+      pendingOffer = null;
+      document.getElementById("incomingPrompt").classList.add("hidden");
 
-        if (pendingPackets.length) {
-          const queued = pendingPackets;
-          pendingPackets = [];
-          queued.forEach(p => handleStripePacket(p.buffer, p.channelIdx));
+      incomingMeta = msg;
+      receivedChunkCount = 0;
+      incomingBytes = 0;
+      channelChunkCounts = [0, 0, 0, 0];
+      updateChannelIndicators();
+
+      if ((msg.v | 0) < 2) { startIncoming(msg, null); return; }   // older sender: no handshake, in-memory
+
+      if (msg.size >= DISK_MIN_BYTES && HAS_FILE_PICKER) { showIncomingPrompt(msg, "disk"); return; }
+      if (msg.size >= MEM_WARN_BYTES) { showIncomingPrompt(msg, "mem"); return; }
+      startIncoming(msg, null);
+    }
+
+    function showIncomingPrompt(meta, kind) {
+      pendingOffer = { meta, kind };
+      document.getElementById("incomingName").textContent = meta.name;
+      document.getElementById("incomingInfo").textContent = kind === "disk"
+        ? formatBytes(meta.size) + " — it will be saved straight to your disk as it arrives, so even very large files won't fill your memory."
+        : formatBytes(meta.size) + " — this browser has to keep the whole file in memory, which may fail for very large files. Chrome or Edge on a computer handles big files best.";
+      document.getElementById("incomingAccept").textContent = kind === "disk" ? "Choose where to save" : "Receive anyway";
+      document.getElementById("incomingPrompt").classList.remove("hidden");
+    }
+
+    async function acceptIncoming() {
+      const offer = pendingOffer;
+      if (!offer || incomingMeta !== offer.meta) return;
+      let writable = null;
+      if (offer.kind === "disk") {
+        try {
+          const handle = await window.showSaveFilePicker({ suggestedName: offer.meta.name });
+          writable = await handle.createWritable();
+        } catch (e) {
+          if (e && e.name === "AbortError") return;     // dialog closed: keep the offer open
+          console.warn("File picker failed, using memory instead:", e);
         }
       }
+      if (incomingMeta !== offer.meta) {                // cancelled while the dialog was open
+        if (writable) { try { await writable.abort(); } catch {} }
+        return;
+      }
+      pendingOffer = null;
+      document.getElementById("incomingPrompt").classList.add("hidden");
+      startIncoming(offer.meta, writable);
+    }
+
+    function declineIncoming() {
+      const offer = pendingOffer;
+      if (!offer) return;
+      sendCtl({ type: "decline", tid: offer.meta.tid });
+      lastClosedId = offer.meta.tid;
+      resetTransferState();
+      appendHistory("Cancelled", offer.meta.name + " — declined", 0, null);
+    }
+
+    function startIncoming(meta, writable) {
+      const sink = {
+        meta,
+        mode: writable ? "disk" : "mem",
+        writable,
+        queue: Promise.resolve(),
+        seen: new Uint8Array(meta.totalChunks),
+        stored: 0,
+        lastAck: 0,
+        segParts: [], segFill: [], segBlobs: [],
+        lastPacketAt: performance.now(),
+        watch: null
+      };
+      incomingSink = sink;
+      incomingStartTime = performance.now();
+      showTelemetry("RECEIVING", meta.name, meta.size);
+      acquireWakeLock();
+
+      sink.watch = setInterval(() => {
+        if (incomingSink !== sink) { clearInterval(sink.watch); return; }
+        if (performance.now() - sink.lastPacketAt > RECV_STALL_MS) {
+          failIncoming(sink, "the sender stopped sending (connection lost?)");
+        }
+      }, 5000);
+
+      if ((meta.v | 0) >= 2) sendCtl({ type: "accept", tid: meta.tid });
+
+      if (pendingPackets.length) {
+        const queued = pendingPackets;
+        pendingPackets = [];
+        queued.forEach(p => handleStripePacket(p.buffer, p.channelIdx));
+      }
+    }
+
+    function disposeSink() {
+      const sink = incomingSink;
+      incomingSink = null;
+      if (!sink) return;
+      clearInterval(sink.watch);
+      if (sink.mode === "disk" && sink.writable) {
+        try { Promise.resolve(sink.writable.abort()).catch(() => {}); } catch {}
+      }
+    }
+
+    function failIncoming(sink, reason) {
+      if (incomingSink !== sink) return;
+      const meta = sink.meta;
+      lastClosedId = meta.tid;
+      sendCtl({ type: "cancel", tid: meta.tid });
+      resetTransferState();
+      appendHistory("Failed", meta.name + " — " + reason, 0, null);
+    }
+
+    function maybeAck(sink) {
+      if (incomingSink !== sink || (sink.meta.v | 0) < 2) return;
+      if (sink.stored - sink.lastAck >= ACK_STEP_BYTES) {
+        sink.lastAck = sink.stored;
+        sendCtl({ type: "ack", tid: sink.meta.tid, bytes: sink.stored });
+      }
+    }
+
+    function storeChunk(sink, idx, plain) {
+      if (sink.mode === "disk") {
+        sink.queue = sink.queue
+          .then(() => sink.writable.write({ type: "write", position: idx * CHUNK_SIZE, data: plain }))
+          .then(() => { sink.stored += plain.byteLength; maybeAck(sink); })
+          .catch((e) => { console.error("Disk write failed:", e); failIncoming(sink, "couldn't write to disk"); });
+        return;
+      }
+      // In-memory fallback: pack every 512 chunks into a Blob so the browser can keep them off the JS heap.
+      const total = sink.meta.totalChunks;
+      const seg = (idx / SEG_CHUNKS) | 0;
+      const parts = sink.segParts[seg] || (sink.segParts[seg] = new Array(Math.min(SEG_CHUNKS, total - seg * SEG_CHUNKS)));
+      parts[idx - seg * SEG_CHUNKS] = plain;
+      sink.segFill[seg] = (sink.segFill[seg] || 0) + 1;
+      if (sink.segFill[seg] === parts.length) {
+        sink.segBlobs[seg] = new Blob(parts);
+        sink.segParts[seg] = null;
+      }
+      sink.stored += plain.byteLength;
+      maybeAck(sink);
     }
 
     async function handleStripePacket(rawData, channelIdx) {
@@ -1322,13 +1603,15 @@
       const tid = view.getUint32(0, false);
       if (tid === lastClosedId) return;
 
-      if (!incomingMeta) {
+      if (!incomingMeta || !incomingSink) {     // meta not here yet, or the user hasn't accepted yet
         if (pendingPackets.length < 256) pendingPackets.push({ buffer, channelIdx });
         return;
       }
-      if (tid !== incomingMeta.tid) return;
 
-      const meta = incomingMeta;
+      const sink = incomingSink;
+      const meta = sink.meta;
+      if (tid !== meta.tid) return;
+
       const chunkIndex = view.getUint32(4, false);
       if (chunkIndex >= meta.totalChunks) return;
 
@@ -1342,38 +1625,56 @@
         return;
       }
 
-      if (incomingMeta !== meta) return;
-
-      if (incomingChunks[chunkIndex] === undefined) {
-        incomingChunks[chunkIndex] = plain;
-        receivedChunkCount++;
-        incomingBytes += plain.byteLength;
-        channelChunkCounts[channelIdx]++;
-      }
+      if (incomingSink !== sink || sink.seen[chunkIndex]) return;
+      sink.seen[chunkIndex] = 1;
+      sink.lastPacketAt = performance.now();
+      receivedChunkCount++;
+      incomingBytes += plain.byteLength;
+      channelChunkCounts[channelIdx]++;
+      storeChunk(sink, chunkIndex, plain);
 
       if (receivedChunkCount % 8 === 0 || receivedChunkCount === meta.totalChunks) {
         updateTelemetry(incomingBytes, meta.size, incomingStartTime);
         updateChannelIndicators();
       }
 
-      if (receivedChunkCount === meta.totalChunks) {
-        const chunks = incomingChunks;
-        lastClosedId = meta.tid;
-        incomingMeta = null;
-        incomingChunks = [];
-        pendingPackets = [];
+      if (receivedChunkCount === meta.totalChunks) finishIncoming(sink);
+    }
 
-        const blob = new Blob(chunks, { type: meta.mime });
-        const url = URL.createObjectURL(blob);
-        triggerDownload(url, meta.name);
-        appendHistory("Received", meta.name, meta.size, url);
-        document.getElementById("transferBox").classList.add("hidden");
+    async function finishIncoming(sink) {
+      const meta = sink.meta;
+      clearInterval(sink.watch);
+      lastClosedId = meta.tid;
+      incomingMeta = null;
+      pendingPackets = [];
+      try {
+        if (sink.mode === "disk") {
+          await sink.queue;
+          if (incomingSink !== sink) return;          // failed or cancelled while writing
+          await sink.writable.close();
+          sink.writable = null;
+          appendHistory("Saved", meta.name, meta.size, null);
+        } else {
+          const blob = new Blob(sink.segBlobs, { type: meta.mime });
+          const url = URL.createObjectURL(blob);
+          triggerDownload(url, meta.name);
+          appendHistory("Received", meta.name, meta.size, url);
+        }
+        sendCtl({ type: "ack", tid: meta.tid, bytes: meta.size, final: true });
+      } catch (e) {
+        console.error("Finishing transfer failed:", e);
+        sendCtl({ type: "cancel", tid: meta.tid });
+        appendHistory("Failed", meta.name + " — couldn't finish saving the file", 0, null);
+      } finally {
+        if (incomingSink === sink) disposeSink();
+        if (!isSending) { releaseWakeLock(); document.getElementById("transferBox").classList.add("hidden"); }
       }
     }
 
     function cancelTransfer() {
       const tid = isSending ? currentSendId : (incomingMeta ? incomingMeta.tid : null);
       transferAborted = true;
+      if (sendState && sendState.notify) sendState.notify();
       if (tid !== null) {
         lastClosedId = tid;
         if (controlConn && controlConn.open) controlConn.send(JSON.stringify({ type: "cancel", tid }));
@@ -1383,12 +1684,15 @@
     }
 
     function resetTransferState() {
+      disposeSink();
       incomingMeta = null;
-      incomingChunks = [];
+      pendingOffer = null;
       pendingPackets = [];
       receivedChunkCount = 0;
       incomingBytes = 0;
+      document.getElementById("incomingPrompt").classList.add("hidden");
       document.getElementById("transferBox").classList.add("hidden");
+      if (!isSending) releaseWakeLock();
     }
 
     /********************************************************************
